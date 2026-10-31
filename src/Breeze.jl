@@ -310,6 +310,30 @@ using .Microphysics
 include("TurbulenceClosures/TurbulenceClosures.jl")
 using .TurbulenceClosures
 
+# The tendency and TKE kernels launch in thread blocks that span several levels. The default 16 × 16 block sweeps the
+# grid level by level; on a large grid (one level of one Float32 field is 7 MB at 3 km) the level below has left the L2
+# cache by the time the next level reads it as a k ± 1 neighbour (six levels for WENO5). Each kernel computes the value
+# at an index from that index alone, so only the mapping of threads to cells changes (shapes measured per kernel at
+# 3 km).
+using KernelAbstractions.NDIteration: StaticSize, _Size
+import .AtmosphereModels: compute_x_momentum_tendency!, compute_y_momentum_tendency!, compute_z_momentum_tendency!,
+                          compute_scalar_tendency!
+import .PotentialTemperatureFormulations: compute_potential_temperature_tendency!
+import .TurbulenceClosures: _add_tke_tendencies!
+import .CompressibleEquations: _initialize_terrain_vertical_momentum_perturbation!
+
+compute_x_momentum_tendency!(dev, ::StaticSize{(16, 16)}, n::_Size) = compute_x_momentum_tendency!(dev, StaticSize((32, 1, 4)), n)
+compute_y_momentum_tendency!(dev, ::StaticSize{(16, 16)}, n::_Size) = compute_y_momentum_tendency!(dev, StaticSize((32, 1, 4)), n)
+compute_z_momentum_tendency!(dev, ::StaticSize{(16, 16)}, n::_Size) = compute_z_momentum_tendency!(dev, StaticSize((32, 1, 4)), n)
+compute_scalar_tendency!(dev, ::StaticSize{(16, 16)}, n::_Size) = compute_scalar_tendency!(dev, StaticSize((32, 1, 4)), n)
+_add_tke_tendencies!(dev, ::StaticSize{(16, 16)}, n::_Size) = _add_tke_tendencies!(dev, StaticSize((64, 1, 4)), n)
+
+compute_potential_temperature_tendency!(dev, ::StaticSize{(16, 16)}, n::_Size) =
+    compute_potential_temperature_tendency!(dev, StaticSize((32, 1, 4)), n)
+
+_initialize_terrain_vertical_momentum_perturbation!(dev, ::StaticSize{(16, 16)}, n::_Size) =
+    _initialize_terrain_vertical_momentum_perturbation!(dev, StaticSize((64, 1, 4)), n)
+
 include("Advection.jl")
 using .Advection
 
