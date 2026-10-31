@@ -27,26 +27,59 @@ Gal-Chen & Somerville (1975) terrain-following formulation: a single decay
 basis ``b(r) = 1 - r/z_{top}`` that linearly attenuates the terrain from the
 surface to the model top.
 """
-struct LinearDecay{FT, H, SX, SY} <: AbstractTerrainFormulation
+struct LinearDecay{FT, H, SX, SY, B} <: AbstractTerrainFormulation
     z_top :: FT
     h     :: H      # terrain height (Center, Center)
     ∂x_h  :: SX     # ∂h/∂x (Face, Center)
     ∂y_h  :: SY     # ∂h/∂y (Center, Face)
+    basis :: B      # LinearBasis (materialized) or Nothing (skeleton)
 end
 
-LinearDecay() = LinearDecay(nothing, nothing, nothing, nothing)
+LinearDecay() = LinearDecay(nothing, nothing, nothing, nothing, nothing)
+LinearDecay(z_top, h, ∂x_h, ∂y_h) = LinearDecay(z_top, h, ∂x_h, ∂y_h, nothing)
 
 Adapt.adapt_structure(to, f::LinearDecay) =
-    LinearDecay(f.z_top, Adapt.adapt(to, f.h), Adapt.adapt(to, f.∂x_h), Adapt.adapt(to, f.∂y_h))
+    LinearDecay(f.z_top, Adapt.adapt(to, f.h), Adapt.adapt(to, f.∂x_h), Adapt.adapt(to, f.∂y_h),
+                Adapt.adapt(to, f.basis))
 
 Oceananigans.Architectures.on_architecture(arch, f::LinearDecay) =
     LinearDecay(f.z_top,
                 Oceananigans.Architectures.on_architecture(arch, f.h),
                 Oceananigans.Architectures.on_architecture(arch, f.∂x_h),
-                Oceananigans.Architectures.on_architecture(arch, f.∂y_h))
+                Oceananigans.Architectures.on_architecture(arch, f.∂y_h),
+                Oceananigans.Architectures.on_architecture(arch, f.basis))
 
 @inline b_linear(r, z_top)  = 1 - r / z_top
 @inline b′_linear(z_top)    = -1 / z_top
+
+#####
+##### Precomputed linear decay basis: b(r) = 1 − r/z_top depends on the reference coordinate alone, but znode and the
+##### slopes evaluate it — a division — at every operator access (≈ 3 distinct levels per stencil kernel, ≈ 75 per cell
+##### per step on the generic acoustic path). As for `TwoLevelBasis`, the materialized formulation stores b at the
+##### Center and Face levels (1D in z over the halo'd k-range, indexed [1, 1, k]) and b′ = −1/z_top as a number; each
+##### entry is filled from `b_linear(rnode(k, grid, ℓz), z_top)` / `b′_linear(z_top)` themselves, so a load returns
+##### the value the expression produces.
+#####
+
+struct LinearBasis{A, FT}
+    bᶜ :: A
+    bᶠ :: A
+    b′ :: FT
+end
+
+Adapt.adapt_structure(to, c::LinearBasis) = LinearBasis(Adapt.adapt(to, c.bᶜ), Adapt.adapt(to, c.bᶠ), c.b′)
+Oceananigans.Architectures.on_architecture(arch, c::LinearBasis) =
+    LinearBasis(Oceananigans.Architectures.on_architecture(arch, c.bᶜ),
+                Oceananigans.Architectures.on_architecture(arch, c.bᶠ), c.b′)
+
+# b(r) at level k and z-location ℓz: the stored value, or (skeleton / unmaterialized) the expression.
+@inline linear_decay(f::LinearDecay{<:Any, <:Any, <:Any, <:Any, Nothing}, k, grid, ℓz) = b_linear(rnode(k, grid, ℓz), f.z_top)
+@inline linear_decay(f::LinearDecay{<:Any, <:Any, <:Any, <:Any, <:LinearBasis}, k, grid, ::Center) = @inbounds f.basis.bᶜ[1, 1, k]
+@inline linear_decay(f::LinearDecay{<:Any, <:Any, <:Any, <:Any, <:LinearBasis}, k, grid, ::Face)   = @inbounds f.basis.bᶠ[1, 1, k]
+@inline linear_decay(f::LinearDecay{<:Any, <:Any, <:Any, <:Any, <:LinearBasis}, k, grid, ℓz) = b_linear(rnode(k, grid, ℓz), f.z_top)
+
+@inline linear_decay_derivative(f::LinearDecay{<:Any, <:Any, <:Any, <:Any, Nothing}) = b′_linear(f.z_top)
+@inline linear_decay_derivative(f::LinearDecay{<:Any, <:Any, <:Any, <:Any, <:LinearBasis}) = f.basis.b′
 
 # h interpolated to the (ℓx, ℓy) horizontal stagger. The `::Nothing` cases
 # arise when one of the horizontal directions is Flat: znode/node may be
@@ -65,24 +98,19 @@ Oceananigans.Architectures.on_architecture(arch, f::LinearDecay) =
 
 @inline function terrain_following_σ(i, j, k, grid, f::LinearDecay, ℓx, ℓy, ℓz)
     h = terrain_at_stagger(i, j, grid, f.h, ℓx, ℓy)
-    return 1 + h * b′_linear(f.z_top)
+    return 1 + h * linear_decay_derivative(f)
 end
 
 @inline function terrain_following_Δz_surface(i, j, k, grid, f::LinearDecay, ℓx, ℓy, ℓz)
-    r = rnode(k, grid, ℓz)
     h = terrain_at_stagger(i, j, grid, f.h, ℓx, ℓy)
-    return h * b_linear(r, f.z_top)
+    return h * linear_decay(f, k, grid, ℓz)
 end
 
-@inline function terrain_following_∂z∂x(i, j, k, grid, f::LinearDecay, ℓz)
-    r = rnode(k, grid, ℓz)
-    @inbounds return f.∂x_h[i, j, 1] * b_linear(r, f.z_top)
-end
+@inline terrain_following_∂z∂x(i, j, k, grid, f::LinearDecay, ℓz) =
+    @inbounds f.∂x_h[i, j, 1] * linear_decay(f, k, grid, ℓz)
 
-@inline function terrain_following_∂z∂y(i, j, k, grid, f::LinearDecay, ℓz)
-    r = rnode(k, grid, ℓz)
-    @inbounds return f.∂y_h[i, j, 1] * b_linear(r, f.z_top)
-end
+@inline terrain_following_∂z∂y(i, j, k, grid, f::LinearDecay, ℓz) =
+    @inbounds f.∂y_h[i, j, 1] * linear_decay(f, k, grid, ℓz)
 
 #####
 ##### TwoLevelDecay — Schär et al. (2002). Large/small split, sinh decay.

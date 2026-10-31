@@ -23,17 +23,38 @@ function allocate_formulation(f::LinearDecay, FT, arch, sz, halo, topo, z_top)
     # than allocating fresh zero-filled arrays.
     if f.h !== nothing
         return Oceananigans.Architectures.on_architecture(arch,
-            LinearDecay(convert(FT, z_top), f.h, f.∂x_h, f.∂y_h))
+            LinearDecay(convert(FT, z_top), f.h, f.∂x_h, f.∂y_h, f.basis))
     end
     h    = centered_data(FT, arch, topo, sz, halo); fill!(h, 0)
     ∂x_h = xface_data(FT, arch, topo, sz, halo); fill!(∂x_h, 0)
     ∂y_h = yface_data(FT, arch, topo, sz, halo); fill!(∂y_h, 0)
-    return LinearDecay(convert(FT, z_top), h, ∂x_h, ∂y_h)
+    bᶜ = zcenter_data(FT, arch, topo, sz, halo); fill!(bᶜ, 0)
+    bᶠ = zface_data(FT, arch, topo, sz, halo);   fill!(bᶠ, 0)
+    basis = LinearBasis(bᶜ, bᶠ, b′_linear(convert(FT, z_top)))
+    return LinearDecay(convert(FT, z_top), h, ∂x_h, ∂y_h, basis)
 end
 
 # 1D-in-z basis component (Center or Face in z, singleton x, y), zero-filled.
 @inline zcenter_data(FT, arch, topo, sz, halo) = new_data(FT, arch, (Nothing, Nothing, Center), topo, sz, halo)
 @inline zface_data(FT, arch, topo, sz, halo)   = new_data(FT, arch, (Nothing, Nothing, Face),   topo, sz, halo)
+
+# b(r) of every level of `b`'s halo'd k-range, from `b_linear(rnode(k, grid, ℓz), z_top)` on the grid's device.
+@kernel function _fill_linear_basis!(b, grid, z_top, ℓz, k₀)
+    n = @index(Global, Linear)
+    k = n + k₀
+    @inbounds b[1, 1, k] = b_linear(rnode(k, grid, ℓz), z_top)
+end
+
+fill_linear_basis!(::Nothing, grid, z_top) = nothing
+
+function fill_linear_basis!(basis::LinearBasis, grid, z_top)
+    dev = Oceananigans.Architectures.device(architecture(grid))
+    for (b, ℓz) in ((basis.bᶜ, Center()), (basis.bᶠ, Face()))
+        k_range = axes(b, 3)
+        _fill_linear_basis!(dev, 64)(b, grid, z_top, ℓz, first(k_range) - 1; ndrange = length(k_range))
+    end
+    return nothing
+end
 
 function allocate_two_level_basis(FT, arch, sz, halo, topo)
     zc() = (a = zcenter_data(FT, arch, topo, sz, halo); fill!(a, 0); a)
@@ -121,6 +142,7 @@ function materialize_formulation!(f::LinearDecay, grid, topography)
     h_field = terrain_height_field(grid, topography)
     parent(f.h) .= parent(h_field)
     fill_terrain_slopes!(f.∂x_h, f.∂y_h, h_field, grid)
+    fill_linear_basis!(f.basis, grid, f.z_top)
     return nothing
 end
 
