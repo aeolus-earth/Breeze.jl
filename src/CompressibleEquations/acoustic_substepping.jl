@@ -631,7 +631,7 @@ end
 
     pgf_term  = - δτᵐ⁺^2 * Cᵏ⁻ * θᵏ⁻ * Δz⁻¹ᵏ⁻ * Δz⁻¹ᶠ
     buoy_term = + δτᵐ⁺^2 * g * Δz⁻¹ᵏ⁻ / 2
-    damp_term = - dᵐ⁺ * Δz⁻¹ᵏ⁻ * Δz⁻¹ᶠ
+    damp_term = vertical_damping_off_diagonal(dᵐ⁺, Δz⁻¹ᵏ⁻, Δz⁻¹ᶠ)
 
     # Upper sponge is local in z (Rayleigh-type), so no off-diagonal coupling.
     return pgf_term + buoy_term + damp_term
@@ -653,7 +653,7 @@ end
 
     pgf_diag   = δτᵐ⁺^2 * θᶜᶜᶠ * (Cᵏ⁺ * Δz⁻¹ᵏ⁺ + Cᵏ⁻ * Δz⁻¹ᵏ⁻) * Δz⁻¹ᶠ
     buoy_diag  = δτᵐ⁺^2 * g * (Δz⁻¹ᵏ⁺ - Δz⁻¹ᵏ⁻) / 2
-    damp_diag  = dᵐ⁺ * (Δz⁻¹ᵏ⁺ + Δz⁻¹ᵏ⁻) * Δz⁻¹ᶠ
+    damp_diag  = vertical_damping_diagonal(dᵐ⁺, Δz⁻¹ᵏ⁺, Δz⁻¹ᵏ⁻, Δz⁻¹ᶠ)
     spnge_diag = sponge_term_diag(i, j, k, grid, sponge, δτᵐ⁺)
 
     return 1 + (pgf_diag + buoy_diag + damp_diag + spnge_diag) * (k > 1)
@@ -670,7 +670,7 @@ end
 
     pgf_term  = - δτᵐ⁺^2 * Cᵏ⁺ * θᵏ⁺ * Δz⁻¹ᵏ⁺ * Δz⁻¹ᶠ
     buoy_term = - δτᵐ⁺^2 * g * Δz⁻¹ᵏ⁺ / 2
-    damp_term = - dᵐ⁺ * Δz⁻¹ᵏ⁺ * Δz⁻¹ᶠ
+    damp_term = vertical_damping_off_diagonal(dᵐ⁺, Δz⁻¹ᵏ⁺, Δz⁻¹ᶠ)
 
     # Upper sponge is local in z (Rayleigh-type), so no off-diagonal coupling.
     return (pgf_term + buoy_term + damp_term) * (k > 1)
@@ -962,8 +962,7 @@ end
         ρ′ᶜᶜᶠˢ⁻ = ℑzᵃᵃᶠ(i, j, k, grid, ρ′)
         Gρwᵇ = g * (δτˢ⁻ * ρ′ᶜᶜᶠˢ⁻ + δτᵐ⁺ * ρ′ᶜᶜᶠ★) # buoyancy
 
-        ∂z²_ρw′ˢ⁻ = ∂zᶜᶜᶠ(i, j, k, grid, ∂zᶜᶜᶜ, ρw′)
-        Gρwᵈ = - dˢ⁻ * ∂z²_ρw′ˢ⁻ # damping
+        Gρwᵈ = vertical_damping_rhs(i, j, k, grid, dˢ⁻, ρw′) # damping
 
         Gρwˢ = sponge_rhs(i, j, k, grid, sponge, δτˢ⁻, ρw′)
 
@@ -1020,15 +1019,26 @@ end
 # — which makes the tridiag and predictor-RHS additions vanish, recovering
 # the pure off-centered CN acoustic system. In the latter case the off-
 # centering itself supplies the vertical damping (Klemp et al. 2018 eq. 32).
-@inline implicit_damping_factors(::AcousticDampingStrategy, ω, grid, FT) = (zero(FT), zero(FT))
+@inline implicit_damping_factors(::AcousticDampingStrategy, ω, grid, FT) = (nothing, nothing)
 
 @inline function implicit_damping_factors(damping::ThermalDivergenceDamping, ω, grid, FT)
-    damping.damp_vertical || return (zero(FT), zero(FT))
+    damping.damp_vertical || return (nothing, nothing)
     α    = convert(FT, damping.coefficient)
     Δz   = convert(FT, minimum_zspacing(grid))
     base = α * Δz^2
     return (convert(FT, ω) * base, convert(FT, 1 - ω) * base)
 end
+
+# Without vertical damping the factors are `nothing` and its terms are the zeros the zero factors gave:
+# `-0 * Δz⁻¹ * Δz⁻¹ = -0` off the diagonal, `0 * … = 0` on it, and no ∂z²(ρw)′ stencil in the rhs.
+@inline vertical_damping_off_diagonal(::Nothing, Δz⁻¹ᶜ, Δz⁻¹ᶠ) = - zero(Δz⁻¹ᶜ)
+@inline vertical_damping_off_diagonal(dᵐ⁺, Δz⁻¹ᶜ, Δz⁻¹ᶠ) = - dᵐ⁺ * Δz⁻¹ᶜ * Δz⁻¹ᶠ
+
+@inline vertical_damping_diagonal(::Nothing, Δz⁻¹ᵏ⁺, Δz⁻¹ᵏ⁻, Δz⁻¹ᶠ) = zero(Δz⁻¹ᶠ)
+@inline vertical_damping_diagonal(dᵐ⁺, Δz⁻¹ᵏ⁺, Δz⁻¹ᵏ⁻, Δz⁻¹ᶠ) = dᵐ⁺ * (Δz⁻¹ᵏ⁺ + Δz⁻¹ᵏ⁻) * Δz⁻¹ᶠ
+
+@inline vertical_damping_rhs(i, j, k, grid, ::Nothing, ρw′) = zero(grid)
+@inline vertical_damping_rhs(i, j, k, grid, dˢ⁻, ρw′) = - dˢ⁻ * ∂zᶜᶜᶠ(i, j, k, grid, ∂zᶜᶜᶜ, ρw′)
 
 # Klemp, Skamarock & Ha (2018) acoustic divergence damping (MPAS form).
 # In the linearized acoustic mode,
