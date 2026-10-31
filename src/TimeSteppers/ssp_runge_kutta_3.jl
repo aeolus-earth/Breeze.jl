@@ -202,7 +202,7 @@ Copy prognostic fields to `U⁰` storage for use in later RK3 stages.
 function store_initial_state!(model)
     U⁰ = model.timestepper.U⁰
     for (u⁰, u) in zip(U⁰, prognostic_fields(model))
-        parent(u⁰) .= parent(u)
+        copyto!(parent(u⁰), parent(u))
     end
     return nothing
 end
