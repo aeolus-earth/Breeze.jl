@@ -316,6 +316,24 @@ using .Advection
 include("Forcings/Forcings.jl")
 using .Forcings
 
+# The thermal divergence damping and TKE closure kernels launch in thread blocks that span several levels rather than
+# the default 16 × 16, which sweeps the grid level by level: on a large grid (one level of one Float32 field is 7 MB at
+# 3 km) the level below has left the L2 cache by the time the next level reads it as a k ± 1 neighbour. The column
+# kernel of the mixing length launches 32 × 8, so that a warp covers 32 consecutive columns. Each kernel computes the
+# value at an index from that index alone, so only the mapping of threads to cells changes.
+using KernelAbstractions.NDIteration: StaticSize, _Size
+import .CompressibleEquations: _thermal_divergence_damping!
+import .TurbulenceClosures: _compute_tke_static_stability!, _compute_tke_closure_fields!,
+                            _compute_tke_implicit_linear_coefficient!, _compute_mixing_length!
+
+_thermal_divergence_damping!(dev, ::StaticSize{(16, 16)}, n::_Size) = _thermal_divergence_damping!(dev, StaticSize((64, 1, 4)), n)
+_compute_tke_static_stability!(dev, ::StaticSize{(16, 16)}, n::_Size) = _compute_tke_static_stability!(dev, StaticSize((64, 1, 4)), n)
+_compute_tke_closure_fields!(dev, ::StaticSize{(16, 16)}, n::_Size) = _compute_tke_closure_fields!(dev, StaticSize((64, 1, 4)), n)
+_compute_mixing_length!(dev, ::StaticSize{(16, 16)}, n::_Size) = _compute_mixing_length!(dev, StaticSize((32, 8)), n)
+
+_compute_tke_implicit_linear_coefficient!(dev, ::StaticSize{(16, 16)}, n::_Size) =
+    _compute_tke_implicit_linear_coefficient!(dev, StaticSize((64, 1, 4)), n)
+
 include("VerticalGrids.jl")
 using .VerticalGrids
 
