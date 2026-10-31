@@ -39,10 +39,15 @@ struct MoistStaticStability end
 Base.summary(::MoistStaticStability) = "MoistStaticStability"
 Base.show(io::IO, ss::MoistStaticStability) = print(io, summary(ss))
 
+# `saturated_static_stabilityᶜᶜᶠ` and `saturatedᶜᶜᶠ` evaluate the moist state of cells k - 1 and k six times
+# each and their saturation specific humidity three times; this evaluates them once, with the same expressions.
 @inline function static_stabilityᶜᶜᶠ(i, j, k, grid, ::MoistStaticStability, buoyancy, tracers)
     N²ᵈ = ∂z_b(i, j, k, grid, buoyancy, tracers)
-    N²ˢ = saturated_static_stabilityᶜᶜᶠ(i, j, k, grid, buoyancy, tracers.T, tracers.qᵛᵉ)
-    saturated = saturatedᶜᶜᶠ(i, j, k, grid, buoyancy, tracers.T, tracers.qᵛᵉ)
+    c⁻ = saturation_quantitiesᶜᶜᶜ(i, j, k-1, grid, buoyancy, tracers.T, tracers.qᵛᵉ)
+    c⁺ = saturation_quantitiesᶜᶜᶜ(i, j, k,   grid, buoyancy, tracers.T, tracers.qᵛᵉ)
+    N²ˢ = saturated_static_stabilityᶜᶜᶠ(i, j, k, grid, buoyancy, tracers.T, c⁻, c⁺)
+    FT = eltype(grid)
+    saturated = FT(0.5) * (c⁻.qʷ + c⁺.qʷ) ≥ FT(0.5) * (c⁻.qˢ + c⁺.qˢ)
     return ifelse(saturated, N²ˢ, N²ᵈ)
 end
 
@@ -53,6 +58,8 @@ end
 # The latent heat over `surface` at temperature `T`, ℒ(T) = ℒ₀ + Δcᵖ T, linear in T with the
 # vapor-condensate heat capacity difference; over a mixed-phase surface both coefficients
 # interpolate between liquid and ice.
+using Oceananigans.Operators: Δz⁻¹ᶜᶜᶠ
+
 @inline latent_heat(T, constants, surface) =
     absolute_zero_latent_heat(constants, surface) + specific_heat_difference(constants, surface) * T
 
@@ -119,6 +126,48 @@ end
 #####
 ##### The saturated branch at the face
 #####
+
+# A cell's `saturation_specific_humidityᶜᶜᶜ`, `nonprecipitating_waterᶜᶜᶜ`, `saturation_mixing_ratioᶜᶜᶜ`,
+# `total_water_mixing_ratioᶜᶜᶜ` and `log_dry_potential_temperatureᶜᶜᶜ`, from one evaluation of its moist state.
+@inline function saturation_quantitiesᶜᶜᶜ(i, j, k, grid, buoyancy, T, qᵛᵉ)
+    Tᵢ, p, ρ, q = moist_stateᶜᶜᶜ(i, j, k, grid, buoyancy, T, qᵛᵉ)
+    qˢ = local_saturation_specific_humidity(i, j, k, buoyancy, Tᵢ, q)
+    qʳ = precipitating_mass_fraction(i, j, k, buoyancy.microphysics, buoyancy.microphysical_fields)
+    qʷ = q.vapor + q.liquid + q.ice - qʳ
+    rˢ = qˢ / (1 - q.vapor - q.liquid - q.ice)
+    qᵗ = q.vapor + q.liquid + q.ice
+    rᵗ = qᵗ / (1 - qᵗ)
+    constants = buoyancy.thermodynamic_constants
+    Rᵈ = dry_air_gas_constant(constants)
+    cᵖᵈ = constants.dry_air.heat_capacity
+    pˢᵗ = standard_pressure(buoyancy.dynamics)
+    lnθ = log(Tᵢ) + Rᵈ / cᵖᵈ * log(pˢᵗ / p)
+    return (; qˢ, qʷ, rˢ, rᵗ, lnθ)
+end
+
+# `saturated_static_stabilityᶜᶜᶠ` from the `saturation_quantitiesᶜᶜᶜ` of cells k - 1 and k.
+@inline function saturated_static_stabilityᶜᶜᶠ(i, j, k, grid, buoyancy, T, c⁻::NamedTuple, c⁺::NamedTuple)
+    constants = buoyancy.thermodynamic_constants
+    g = constants.gravitational_acceleration
+    Rᵈ = dry_air_gas_constant(constants)
+    Rᵛ = vapor_gas_constant(constants)
+    cᵖᵈ = constants.dry_air.heat_capacity
+    ϵ = Rᵈ / Rᵛ
+    FT = eltype(grid)
+    Δz⁻¹ = Δz⁻¹ᶜᶜᶠ(i, j, k, grid)
+
+    Tᶠ = ℑzᵃᵃᶠ(i, j, k, grid, T)
+    rˢ = FT(0.5) * (c⁻.rˢ + c⁺.rˢ)
+    equilibrium = microphysics_phase_equilibrium(buoyancy.microphysics)
+    ℒ = latent_heat(Tᶠ, constants, equilibrated_surface(equilibrium, Tᶠ))
+
+    ∂z_lnθ = (c⁺.lnθ - c⁻.lnθ) * Δz⁻¹
+    ∂z_rˢ = (c⁺.rˢ - c⁻.rˢ) * Δz⁻¹
+    ∂z_rᵗ = (c⁺.rᵗ - c⁻.rᵗ) * Δz⁻¹
+
+    A = (1 + ℒ * rˢ / (Rᵈ * Tᶠ)) / (1 + ϵ * ℒ^2 * rˢ / (cᵖᵈ * Rᵈ * Tᶠ^2))
+    return g * (A * (∂z_lnθ + ℒ / (cᵖᵈ * Tᶠ) * ∂z_rˢ) - ∂z_rᵗ)
+end
 
 @inline function saturatedᶜᶜᶠ(i, j, k, grid, buoyancy, T, qᵛᵉ)
     qʷ = ℑzᵃᵃᶠ(i, j, k, grid, nonprecipitating_waterᶜᶜᶜ, buoyancy, T, qᵛᵉ)
