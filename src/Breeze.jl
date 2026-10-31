@@ -295,6 +295,29 @@ using .CompressibleEquations: CompressibleDynamics, CompressibleModel, AcousticS
                               AbstractRamp, LinearRamp, CubicRamp, Sin2Ramp,
                               ExplicitTimeStepping
 
+# The acoustic substep's largest kernels launch in thread blocks that span several levels. The default 16 × 16 block
+# sweeps the grid level by level; on a large grid (one level of one Float32 field is 7 MB at 3 km) the level below has
+# left the L2 cache by the time the next level reads it as a k ± 1 neighbour. Each kernel computes the value at an
+# index from that index alone, so only the mapping of threads to cells changes (shapes measured per kernel at 3 km).
+using KernelAbstractions.NDIteration: StaticSize, _Size
+import .AtmosphereModels: _compute_velocities!
+import .CompressibleEquations: _build_vertical_rhs!, _explicit_horizontal_step!, _build_predictors!, _post_solve_recovery!,
+                               _recover_full_state!, _finalize_time_averaged_velocity!,
+                               _assemble_terrain_slow_vertical_momentum_tendency!
+
+_build_vertical_rhs!(dev, ::StaticSize{(16, 16)}, n::_Size) = _build_vertical_rhs!(dev, StaticSize((64, 1, 4)), n)
+_explicit_horizontal_step!(dev, ::StaticSize{(16, 16)}, n::_Size) = _explicit_horizontal_step!(dev, StaticSize((32, 1, 4)), n)
+_build_predictors!(dev, ::StaticSize{(16, 16)}, n::_Size) = _build_predictors!(dev, StaticSize((32, 1, 4)), n)
+_post_solve_recovery!(dev, ::StaticSize{(16, 16)}, n::_Size) = _post_solve_recovery!(dev, StaticSize((64, 1, 4)), n)
+_recover_full_state!(dev, ::StaticSize{(16, 16)}, n::_Size) = _recover_full_state!(dev, StaticSize((64, 1, 4)), n)
+_compute_velocities!(dev, ::StaticSize{(16, 16)}, n::_Size) = _compute_velocities!(dev, StaticSize((64, 1, 4)), n)
+
+_finalize_time_averaged_velocity!(dev, ::StaticSize{(16, 16)}, n::_Size) =
+    _finalize_time_averaged_velocity!(dev, StaticSize((128, 1, 2)), n)
+
+_assemble_terrain_slow_vertical_momentum_tendency!(dev, ::StaticSize{(16, 16)}, n::_Size) =
+    _assemble_terrain_slow_vertical_momentum_tendency!(dev, StaticSize((32, 1, 8)), n)
+
 include("KinematicDriver/KinematicDriver.jl")
 using .KinematicDriver: PrescribedDensity, PrescribedDynamics, KinematicModel
 
